@@ -16,6 +16,7 @@ RUN echo "invalidate cache"
 # Optionally set environment variables (you can override these at runtime)
 ENV AUDIO_LIST_URL="http://audio-uploader:3001/queue"
 ENV INFERENCE_URL="http://pytorch-audio-inference:5000/infer"
+ENV RESULT_URL="http://audio-uploader:3001/inference-result"
 ENV DOWNLOAD_DIR="/tmp/audio_files"
 ENV PROCESSED_FILE="/tmp/processed_files.txt"
 ENV PORT=5009

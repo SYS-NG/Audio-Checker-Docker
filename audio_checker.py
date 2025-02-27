@@ -97,14 +97,74 @@ def trigger_inference(file_path):
     try:
         with open(file_path, "rb") as f:
             files = {"file": (os.path.basename(file_path), f, "audio/wav")}
-            logger.info(f"Sending {file_path} to inference container")
+            logger.info(f"Sending {file_path} to inference container at URL: {INFERENCE_URL}")
+            logger.info(f"File size: {os.path.getsize(file_path)} bytes")
+            
+            # Log request details before sending
+            logger.info(f"Making POST request with file: {os.path.basename(file_path)}")
+            
+            # Send the request and time it
+            start_time = time.time()
             response = requests.post(INFERENCE_URL, files=files)
+            request_time = time.time() - start_time
+            
+            # Log response details
+            logger.info(f"Inference request completed in {request_time:.2f} seconds")
+            logger.info(f"Response status code: {response.status_code}")
+            logger.info(f"Response headers: {response.headers}")
+            
             response.raise_for_status()
             logger.info(f"Inference response for {file_path}: {response.text}")
             return response.text
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error when triggering inference: {e}")
+        logger.error(f"Could not connect to inference server at {INFERENCE_URL}. Is it running?")
+        return None
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Timeout error when triggering inference: {e}")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error when triggering inference: {e}")
+        return None
     except Exception as e:
         logger.error(f"Error triggering inference for {file_path}: {e}")
+        logger.exception("Full exception details:")
         return None
+
+def send_inference_result(filename, inference_result):
+    """
+    Sends the inference result back to the audio-uploader endpoint.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Parse the inference result to determine if it's human or not
+        # Assuming the inference result is a JSON string containing an "isHuman" field
+        import json
+        result_data = json.loads(inference_result)
+        is_human = result_data.get("prediction", "").lower() == "human"
+        
+        # Prepare the payload
+        payload = {
+            "filename": filename,
+            "isHuman": is_human
+        }
+        
+        # URL for the audio-uploader endpoint
+        result_url = os.getenv("RESULT_URL", "http://localhost:3001/inference-result")
+        
+        logger.info(f"Sending inference result for {filename} to {result_url}")
+        logger.info(f"Payload: {payload}")
+        
+        # Send the POST request
+        response = requests.post(result_url, json=payload)
+        response.raise_for_status()
+        
+        logger.info(f"Result submission response: {response.text}")
+        return True
+    except Exception as e:
+        logger.error(f"Error sending inference result for {filename}: {e}")
+        logger.exception("Full exception details:")
+        return False
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -115,11 +175,16 @@ def process_audio():
     Endpoint that checks for new audio files, processes them,
     and returns the inference results.
     """
+    logger.info("Received request to process audio files")
     results = []
     audio_files = check_for_new_files()
     
+    logger.info(f"Found {len(audio_files)} audio files to process")
+    
     for queued_audio_data in audio_files:
         file_url = queued_audio_data['downloadUrl']
+        filename = file_url.split("/")[-1]
+        logger.info(f"Processing file with URL: {file_url}")
         
         # Skip files that have already been processed
         if file_url in processed_files:
@@ -133,21 +198,38 @@ def process_audio():
 
         local_file = download_file(file_url)
         if local_file:
+            logger.info(f"Successfully downloaded file to {local_file}, triggering inference")
             inference_result = trigger_inference(local_file)
-            processed_files.add(file_url)
-            save_processed(file_url)
-            results.append({
-                'url': file_url,
-                'status': 'success',
-                'inference_result': inference_result
-            })
+            
+            if inference_result:
+                logger.info(f"Inference successful for {file_url}")
+                
+                # Send the inference result back to the audio-uploader
+                _ = send_inference_result(filename, inference_result)
+                
+                processed_files.add(file_url)
+                save_processed(file_url)
+                results.append({
+                    'url': file_url,
+                    'status': 'success',
+                    'inference_result': inference_result,
+                })
+            else:
+                logger.error(f"Inference failed for {file_url}")
+                results.append({
+                    'url': file_url,
+                    'status': 'error',
+                    'message': 'Inference failed'
+                })
         else:
+            logger.error(f"Failed to download file from {file_url}")
             results.append({
                 'url': file_url,
                 'status': 'error',
                 'message': 'Failed to download file'
             })
 
+    logger.info(f"Processed {len(results)} files, returning results")
     return jsonify({
         'processed_files': len(results),
         'results': results
@@ -160,5 +242,6 @@ if __name__ == "__main__":
     logger.info(f"PORT: {os.getenv('PORT')}")
     logger.info(f"AUDIO_LIST_URL: {os.getenv('AUDIO_LIST_URL')}")
     logger.info(f"INFERENCE_URL: {os.getenv('INFERENCE_URL')}")
+    logger.info(f"RESULT_URL: {os.getenv('RESULT_URL', 'http://localhost:3001/inference-result')}")
     logger.info(f"Starting Flask app on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
